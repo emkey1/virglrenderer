@@ -147,6 +147,18 @@ os_create_anonymous_file(off_t size, const char *debug_name)
      if (errno != EEXIST)
        break;
    }
+   /* If the sandbox refuses POSIX shared memory, as an iOS app's may, an
+    * unlinked file in its own temporary directory maps the same way. */
+   if (fd < 0) {
+     const char *dir = getenv("TMPDIR");
+     char path[1024];
+     snprintf(path, sizeof(path), "%s/%s-XXXXXX", dir ? dir : "/tmp", tag);
+     fd = mkstemp(path);
+     if (fd >= 0) {
+       unlink(path);
+       fcntl(fd, F_SETFD, FD_CLOEXEC);
+     }
+   }
 #elif defined(__OpenBSD__)
    char template[] = "/tmp/mesa-XXXXXXXXXX";
    fd = shm_mkstemp(template);
