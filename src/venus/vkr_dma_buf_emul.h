@@ -48,14 +48,19 @@ vkr_emul_external_memory_properties(VkExternalMemoryProperties *props)
 }
 
 /* Rewrite a VkImageCreateInfo for the host. Sets *is_dma_buf when the image
- * is meant to share memory, whose types must then be host-visible.
+ * is meant to share memory, whose types must then be host-visible, and
+ * *explicit_pitch to the row pitch an explicit modifier layout asks for (0
+ * for none): the host picks its own for a LINEAR image, and the caller must
+ * check they agree.
  */
 static inline VkResult
 vkr_emul_fix_image_create_info(const struct vkr_physical_device *physical_dev,
                                VkImageCreateInfo *info,
-                               bool *is_dma_buf)
+                               bool *is_dma_buf,
+                               uint64_t *explicit_pitch)
 {
    *is_dma_buf = false;
+   *explicit_pitch = 0;
    if (!physical_dev->emulate_dma_buf)
       return VK_SUCCESS;
 
@@ -77,6 +82,11 @@ vkr_emul_fix_image_create_info(const struct vkr_physical_device *physical_dev,
             linear |= list->pDrmFormatModifiers[i] == VKR_DRM_FORMAT_MOD_LINEAR;
       } else if (explicit) {
          linear = explicit->drmFormatModifier == VKR_DRM_FORMAT_MOD_LINEAR;
+         if (explicit->drmFormatModifierPlaneCount >= 1 && explicit->pPlaneLayouts) {
+            if (explicit->pPlaneLayouts[0].offset != 0)
+               return VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
+            *explicit_pitch = explicit->pPlaneLayouts[0].rowPitch;
+         }
       }
       if (!linear)
          return VK_ERROR_FORMAT_NOT_SUPPORTED;

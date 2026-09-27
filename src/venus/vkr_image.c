@@ -34,15 +34,35 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
 
    struct vkr_device *dev = vkr_device_from_handle(args->device);
    bool dma_buf;
+   uint64_t explicit_pitch;
    VkResult result = vkr_emul_fix_image_create_info(
-      dev->physical_device, (VkImageCreateInfo *)args->pCreateInfo, &dma_buf);
+      dev->physical_device, (VkImageCreateInfo *)args->pCreateInfo, &dma_buf,
+      &explicit_pitch);
    if (result != VK_SUCCESS) {
       args->ret = result;
       return;
    }
    struct vkr_image *image = vkr_image_create_and_add(dispatch->data, args);
-   if (image)
-      image->dma_buf = dma_buf;
+   if (!image)
+      return;
+   image->dma_buf = dma_buf;
+
+   /* iSH-AOK: an imported LINEAR buffer is only this image if the host lays
+    * its rows out the same way. */
+   if (explicit_pitch) {
+      struct vn_device_proc_table *vk = &dev->proc_table;
+      const VkImageSubresource sub = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
+      VkSubresourceLayout layout;
+      vk->GetImageSubresourceLayout(dev->base.handle.device, image->base.handle.image, &sub,
+                                    &layout);
+      if (layout.rowPitch != explicit_pitch) {
+         vkr_log("dma-buf image row pitch %" PRIu64 " is not the host's %" PRIu64,
+                 explicit_pitch, (uint64_t)layout.rowPitch);
+         vk->DestroyImage(dev->base.handle.device, image->base.handle.image, NULL);
+         vkr_device_remove_object(dispatch->data, dev, &image->base);
+         args->ret = VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT;
+      }
+   }
 }
 
 static void
@@ -255,9 +275,10 @@ vkr_dispatch_vkGetDeviceImageMemoryRequirements(
 
    vn_replace_vkGetDeviceImageMemoryRequirements_args_handle(args);
    bool dma_buf;
+   uint64_t explicit_pitch;
    if (vkr_emul_fix_image_create_info(dev->physical_device,
                                       (VkImageCreateInfo *)args->pInfo->pCreateInfo,
-                                      &dma_buf) != VK_SUCCESS) {
+                                      &dma_buf, &explicit_pitch) != VK_SUCCESS) {
       args->pMemoryRequirements->memoryRequirements.memoryTypeBits = 0;
       return;
    }
