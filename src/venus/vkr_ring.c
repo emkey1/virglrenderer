@@ -11,6 +11,13 @@
 
 #include "vn_protocol_renderer_dispatches.h"
 
+/* iSH-AOK: vn_dispatch_command as a plain function, for vkr_objc_guard. */
+static void
+vkr_dispatch_one_command(void *dispatch)
+{
+   vn_dispatch_command(dispatch);
+}
+
 #include "vkr_context.h"
 
 static inline void *
@@ -227,7 +234,8 @@ vkr_ring_submit_cmd(struct vkr_ring *ring,
    vkr_cs_decoder_set_buffer_stream(dec, buffer, size);
 
    while (vkr_cs_decoder_has_command(dec)) {
-      vn_dispatch_command(&ring->dispatch);
+      if (!vkr_objc_guard(vkr_dispatch_one_command, &ring->dispatch))
+         vkr_cs_decoder_set_fatal(dec);
       if (vkr_cs_decoder_get_fatal(dec)) {
          vkr_log("ring_submit_cmd: vn_dispatch_command failed");
 

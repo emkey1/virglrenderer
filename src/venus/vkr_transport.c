@@ -8,6 +8,13 @@
 #include "vn_protocol_renderer_dispatches.h"
 #include "vn_protocol_renderer_transport.h"
 
+/* iSH-AOK: vn_dispatch_command as a plain function, for vkr_objc_guard. */
+static void
+vkr_dispatch_one_command(void *dispatch)
+{
+   vn_dispatch_command(dispatch);
+}
+
 #include "vkr_context.h"
 #include "vkr_ring.h"
 
@@ -80,7 +87,8 @@ vkr_dispatch_vkExecuteCommandStreamsMESA(
       }
 
       while (vkr_cs_decoder_has_command(dec)) {
-         vn_dispatch_command(dispatch);
+         if (!vkr_objc_guard(vkr_dispatch_one_command, dispatch))
+            vkr_context_set_fatal(ctx);
          if (vkr_context_get_fatal(ctx))
             break;
       }

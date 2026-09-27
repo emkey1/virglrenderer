@@ -369,4 +369,24 @@ vkr_seqno_ge(uint32_t a, uint32_t b)
    return (a - b) <= INT32_MAX;
 }
 
+/* iSH-AOK: run fn(arg), catching an Objective-C exception from the host's
+ * Vulkan (MoltenVK raises them, e.g. for a selector a category failed to
+ * provide) so it ends one guest context instead of the whole process.
+ * Returns false when one was caught; the caller marks the context fatal.
+ * Nothing unwound between the throw and the catch runs its cleanup, so a
+ * lock taken there stays taken: the context must not be used again, which
+ * being fatal ensures.
+ */
+#ifdef __APPLE__
+bool
+vkr_objc_guard(void (*fn)(void *), void *arg);
+#else
+static inline bool
+vkr_objc_guard(void (*fn)(void *), void *arg)
+{
+   fn(arg);
+   return true;
+}
+#endif
+
 #endif /* VKR_COMMON_H */

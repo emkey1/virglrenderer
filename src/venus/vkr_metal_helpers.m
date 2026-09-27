@@ -17,6 +17,19 @@
 
 #include "vkr_metal_helpers.h"
 
+bool
+vkr_objc_guard(void (*fn)(void *), void *arg)
+{
+   @try {
+      fn(arg);
+   } @catch (NSException *e) {
+      vkr_log("host Vulkan raised %s: %s; the context is lost", e.name.UTF8String,
+              e.reason.UTF8String);
+      return false;
+   }
+   return true;
+}
+
 void *
 vkr_metal_get_device(VkDevice vk_device, PFN_vkGetDeviceProcAddr GetDeviceProcAddr)
 {

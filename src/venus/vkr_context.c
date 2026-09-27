@@ -35,6 +35,14 @@
 #include "vkr_ring.h"
 #include "vkr_transport.h"
 
+/* iSH-AOK: vn_dispatch_command as a plain function, for vkr_objc_guard. */
+static void
+vkr_dispatch_one_command(void *dispatch)
+{
+   vn_dispatch_command(dispatch);
+}
+
+
 void
 vkr_context_add_instance(struct vkr_context *ctx,
                          struct vkr_instance *instance,
@@ -172,7 +180,8 @@ vkr_context_submit_cmd(struct vkr_context *ctx, const void *buffer, size_t size)
    vkr_cs_decoder_set_buffer_stream(&ctx->decoder, buffer, size);
 
    while (vkr_cs_decoder_has_command(&ctx->decoder)) {
-      vn_dispatch_command(&ctx->dispatch);
+      if (!vkr_objc_guard(vkr_dispatch_one_command, &ctx->dispatch))
+         vkr_context_set_fatal(ctx);
       if (vkr_context_get_fatal(ctx)) {
          vkr_log("submit_cmd: vn_dispatch_command failed");
 
