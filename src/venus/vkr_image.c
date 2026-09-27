@@ -7,6 +7,7 @@
 
 #include "vkr_image_gen.h"
 #include "vkr_physical_device.h"
+#include "vkr_dma_buf_emul.h"
 
 static void
 vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
@@ -31,7 +32,17 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
     * situation because the app does not consider the memory external.
     */
 
-   vkr_image_create_and_add(dispatch->data, args);
+   struct vkr_device *dev = vkr_device_from_handle(args->device);
+   bool dma_buf;
+   VkResult result = vkr_emul_fix_image_create_info(
+      dev->physical_device, (VkImageCreateInfo *)args->pCreateInfo, &dma_buf);
+   if (result != VK_SUCCESS) {
+      args->ret = result;
+      return;
+   }
+   struct vkr_image *image = vkr_image_create_and_add(dispatch->data, args);
+   if (image)
+      image->dma_buf = dma_buf;
 }
 
 static void
@@ -49,8 +60,12 @@ vkr_dispatch_vkGetImageMemoryRequirements(
    struct vkr_device *dev = vkr_device_from_handle(args->device);
    struct vn_device_proc_table *vk = &dev->proc_table;
 
+   const bool dma_buf = vkr_image_from_handle(args->image)->dma_buf;
    vn_replace_vkGetImageMemoryRequirements_args_handle(args);
    vk->GetImageMemoryRequirements(args->device, args->image, args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(dev->physical_device,
+                                 &args->pMemoryRequirements->memoryTypeBits);
 }
 
 static void
@@ -61,8 +76,12 @@ vkr_dispatch_vkGetImageMemoryRequirements2(
    struct vkr_device *dev = vkr_device_from_handle(args->device);
    struct vn_device_proc_table *vk = &dev->proc_table;
 
+   const bool dma_buf = vkr_image_from_handle(args->pInfo->image)->dma_buf;
    vn_replace_vkGetImageMemoryRequirements2_args_handle(args);
    vk->GetImageMemoryRequirements2(args->device, args->pInfo, args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(
+         dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
 }
 
 static void
@@ -125,6 +144,10 @@ vkr_dispatch_vkGetImageSubresourceLayout(
    struct vn_device_proc_table *vk = &dev->proc_table;
 
    vn_replace_vkGetImageSubresourceLayout_args_handle(args);
+   /* iSH-AOK: a LINEAR image's one memory plane is its colour aspect. */
+   if (dev->physical_device->emulate_dma_buf &&
+       args->pSubresource->aspectMask == VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT)
+      ((VkImageSubresource *)args->pSubresource)->aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
    vk->GetImageSubresourceLayout(args->device, args->image, args->pSubresource,
                                  args->pLayout);
 }
@@ -138,6 +161,11 @@ vkr_dispatch_vkGetImageSubresourceLayout2(
    struct vn_device_proc_table *vk = &dev->proc_table;
 
    vn_replace_vkGetImageSubresourceLayout2_args_handle(args);
+   if (dev->physical_device->emulate_dma_buf &&
+       args->pSubresource->imageSubresource.aspectMask ==
+          VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT)
+      ((VkImageSubresource2 *)args->pSubresource)->imageSubresource.aspectMask =
+         VK_IMAGE_ASPECT_COLOR_BIT;
    vk->GetImageSubresourceLayout2(args->device, args->image, args->pSubresource,
                                   args->pLayout);
 }
@@ -163,6 +191,12 @@ vkr_dispatch_vkGetImageDrmFormatModifierPropertiesEXT(
    struct vn_device_proc_table *vk = &dev->proc_table;
 
    vn_replace_vkGetImageDrmFormatModifierPropertiesEXT_args_handle(args);
+   /* iSH-AOK: every modifier image here is LINEAR. */
+   if (dev->physical_device->emulate_dma_buf) {
+      args->pProperties->drmFormatModifier = VKR_DRM_FORMAT_MOD_LINEAR;
+      args->ret = VK_SUCCESS;
+      return;
+   }
    args->ret = vk->GetImageDrmFormatModifierPropertiesEXT(args->device, args->image,
                                                           args->pProperties);
 }
@@ -220,8 +254,18 @@ vkr_dispatch_vkGetDeviceImageMemoryRequirements(
    struct vn_device_proc_table *vk = &dev->proc_table;
 
    vn_replace_vkGetDeviceImageMemoryRequirements_args_handle(args);
+   bool dma_buf;
+   if (vkr_emul_fix_image_create_info(dev->physical_device,
+                                      (VkImageCreateInfo *)args->pInfo->pCreateInfo,
+                                      &dma_buf) != VK_SUCCESS) {
+      args->pMemoryRequirements->memoryRequirements.memoryTypeBits = 0;
+      return;
+   }
    vk->GetDeviceImageMemoryRequirements(args->device, args->pInfo,
                                         args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(
+         dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
 }
 
 static void

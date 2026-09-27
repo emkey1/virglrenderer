@@ -4,6 +4,7 @@
  */
 
 #include "vkr_physical_device.h"
+#include "vkr_dma_buf_emul.h"
 
 #include "vn_protocol_renderer_device.h"
 
@@ -173,6 +174,13 @@ vkr_physical_device_init_memory_properties(struct vkr_physical_device *physical_
    VkPhysicalDevice handle = physical_dev->base.handle.physical_device;
    vk->GetPhysicalDeviceMemoryProperties(handle, &physical_dev->memory_properties);
 
+   physical_dev->host_visible_memory_type_bits = 0;
+   for (uint32_t i = 0; i < physical_dev->memory_properties.memoryTypeCount; i++) {
+      if (physical_dev->memory_properties.memoryTypes[i].propertyFlags &
+          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+         physical_dev->host_visible_memory_type_bits |= 1u << i;
+   }
+
    /* XXX When a VkMemoryType has VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, we
     * assume any VkDeviceMemory with the memory type can be made external and
     * be exportable.  That is incorrect but is what we have to live with with
@@ -339,6 +347,35 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
          advertised_count++;
       } else {
          vkr_log("failed to inject VK_KHR_external_memory_fd");
+      }
+   }
+
+   /* iSH-AOK: see vkr_dma_buf_emul.h. */
+   const char *dma_buf_env = getenv("VKR_DMA_BUF_EMULATION");
+   if (physical_dev->EXT_external_memory_metal && !physical_dev->EXT_external_memory_dma_buf &&
+       !(dma_buf_env && !strcmp(dma_buf_env, "0"))) {
+      static const char *const emulated[] = {
+         VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+         VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+         VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+      };
+      const uint32_t n = ARRAY_SIZE(emulated);
+      VkExtensionProperties *new_exts = realloc(exts, sizeof(*exts) * (advertised_count + n));
+      if (new_exts) {
+         exts = new_exts;
+         for (uint32_t i = 0; i < n; i++) {
+            bool present = false;
+            for (uint32_t j = 0; j < advertised_count; j++)
+               present |= !strcmp(exts[j].extensionName, emulated[i]);
+            if (present)
+               continue;
+            strcpy(exts[advertised_count].extensionName, emulated[i]);
+            exts[advertised_count].specVersion = 1;
+            advertised_count++;
+         }
+         physical_dev->emulate_dma_buf = true;
+      } else {
+         vkr_log("failed to inject dma-buf extensions");
       }
    }
 
@@ -758,6 +795,40 @@ vkr_dispatch_vkGetPhysicalDeviceFormatProperties2(
    vn_replace_vkGetPhysicalDeviceFormatProperties2_args_handle(args);
    vk->GetPhysicalDeviceFormatProperties2(args->physicalDevice, args->format,
                                           args->pFormatProperties);
+
+   /* iSH-AOK: one modifier, LINEAR, with linear tiling's features. */
+   if (physical_dev->emulate_dma_buf) {
+      VkFormatProperties2 *props = args->pFormatProperties;
+      const VkFormatFeatureFlags linear = props->formatProperties.linearTilingFeatures;
+      const uint32_t count = linear ? 1 : 0;
+      VkDrmFormatModifierPropertiesListEXT *list = vkr_find_struct(
+         props->pNext, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+      if (list) {
+         if (list->pDrmFormatModifierProperties && list->drmFormatModifierCount && count) {
+            list->pDrmFormatModifierProperties[0] = (VkDrmFormatModifierPropertiesEXT){
+               .drmFormatModifier = VKR_DRM_FORMAT_MOD_LINEAR,
+               .drmFormatModifierPlaneCount = 1,
+               .drmFormatModifierTilingFeatures = linear,
+            };
+         }
+         list->drmFormatModifierCount = count;
+      }
+      VkDrmFormatModifierPropertiesList2EXT *list2 = vkr_find_struct(
+         props->pNext, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_2_EXT);
+      if (list2) {
+         const VkFormatProperties3 *props3 =
+            vkr_find_struct(props->pNext, VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3);
+         const VkFormatFeatureFlags2 linear2 = props3 ? props3->linearTilingFeatures : linear;
+         if (list2->pDrmFormatModifierProperties && list2->drmFormatModifierCount && count) {
+            list2->pDrmFormatModifierProperties[0] = (VkDrmFormatModifierProperties2EXT){
+               .drmFormatModifier = VKR_DRM_FORMAT_MOD_LINEAR,
+               .drmFormatModifierPlaneCount = 1,
+               .drmFormatModifierTilingFeatures = linear2,
+            };
+         }
+         list2->drmFormatModifierCount = count;
+      }
+   }
 }
 
 static void
@@ -770,8 +841,43 @@ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
    struct vn_physical_device_proc_table *vk = &physical_dev->proc_table;
 
    vn_replace_vkGetPhysicalDeviceImageFormatProperties2_args_handle(args);
+
+   /* iSH-AOK: LINEAR stands in for the one modifier, and dma-buf is
+    * host-visible memory (vkr_dma_buf_emul.h).
+    */
+   bool dma_buf = false;
+   if (physical_dev->emulate_dma_buf) {
+      VkPhysicalDeviceImageFormatInfo2 *info =
+         (VkPhysicalDeviceImageFormatInfo2 *)args->pImageFormatInfo;
+      const VkPhysicalDeviceExternalImageFormatInfo *ext = vkr_find_struct(
+         info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
+      if (ext && ext->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+         dma_buf = true;
+         vkr_remove_struct(info, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO);
+      }
+      if (info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT) {
+         const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod = vkr_find_struct(
+            info->pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+         if (!mod || mod->drmFormatModifier != VKR_DRM_FORMAT_MOD_LINEAR) {
+            args->ret = VK_ERROR_FORMAT_NOT_SUPPORTED;
+            return;
+         }
+         vkr_remove_struct(info,
+                           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+         info->tiling = VK_IMAGE_TILING_LINEAR;
+      }
+   }
+
    args->ret = vk->GetPhysicalDeviceImageFormatProperties2(
       args->physicalDevice, args->pImageFormatInfo, args->pImageFormatProperties);
+
+   if (dma_buf && args->ret == VK_SUCCESS) {
+      VkExternalImageFormatProperties *ext_props =
+         vkr_find_struct(args->pImageFormatProperties->pNext,
+                         VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES);
+      if (ext_props)
+         vkr_emul_external_memory_properties(&ext_props->externalMemoryProperties);
+   }
 }
 
 static void
@@ -800,6 +906,12 @@ vkr_dispatch_vkGetPhysicalDeviceExternalBufferProperties(
    vn_replace_vkGetPhysicalDeviceExternalBufferProperties_args_handle(args);
    vk->GetPhysicalDeviceExternalBufferProperties(
       args->physicalDevice, args->pExternalBufferInfo, args->pExternalBufferProperties);
+
+   /* iSH-AOK: see vkr_dma_buf_emul.h. */
+   if (physical_dev->emulate_dma_buf && args->pExternalBufferInfo->handleType ==
+                                           VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
+      vkr_emul_external_memory_properties(
+         &args->pExternalBufferProperties->externalMemoryProperties);
 }
 
 static void

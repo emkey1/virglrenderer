@@ -11,6 +11,7 @@
 
 #include "vkr_device_memory_gen.h"
 #include "vkr_metal_helpers.h"
+#include "vkr_dma_buf_emul.h"
 #include "vkr_physical_device.h"
 
 static bool
@@ -265,6 +266,32 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    VkImportMemoryResourceInfoMESA *res_info = NULL;
    void *prev_of_res_info = vkr_find_prev_struct(
       alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
+   struct vkr_mtl_shm *mtl_shm = NULL;
+   VkImportMemoryMetalHandleInfoEXT local_metal_import;
+   if (prev_of_res_info && physical_dev->emulate_dma_buf) {
+      /* iSH-AOK: a SHM resource (another context's dma-buf, see
+       * vkr_dma_buf_emul.h) is imported by wrapping its mapping.
+       */
+      res_info = (VkImportMemoryResourceInfoMESA *)vkr_pnext_get_next(prev_of_res_info);
+      struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
+      if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM) {
+         mtl_shm = vkr_mtl_shm_wrap(dev->mtl_device, res->u.data, res->size);
+         if (!mtl_shm) {
+            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return;
+         }
+         local_metal_import = (VkImportMemoryMetalHandleInfoEXT){
+            .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT,
+            .pNext = res_info->pNext,
+            .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT,
+            .handle = mtl_shm->mtl_buffer,
+         };
+         vkr_pnext_set_next(prev_of_res_info, &local_metal_import);
+         prev_of_res_info = NULL;
+      } else {
+         res_info = NULL;
+      }
+   }
    if (prev_of_res_info) {
       res_info = (VkImportMemoryResourceInfoMESA *)vkr_pnext_get_next(prev_of_res_info);
       if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
@@ -297,9 +324,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    uint32_t valid_fd_types = 0;
    int udmabuf_fd = -1;
    void *gbm_bo = NULL;
-   struct vkr_mtl_shm *mtl_shm = NULL;
    VkExportMemoryAllocateInfo local_export_info;
-   VkImportMemoryMetalHandleInfoEXT local_metal_import;
 
    if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
       /* An implementation can support dma_buf import along with opaque fd export/import.
@@ -396,6 +421,18 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
       }
    }
 
+   /* iSH-AOK: the host has no dma-buf; the memory is exported as SHM instead
+    * (vkr_dma_buf_emul.h), so the request must not reach it.
+    */
+   if (physical_dev->emulate_dma_buf && export_info &&
+       (export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
+      export_info->handleTypes &= ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      if (!export_info->handleTypes) {
+         vkr_remove_struct(alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
+         export_info = NULL;
+      }
+   }
+
    if (export_info) {
       if (export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)
          valid_fd_types |= 1 << VIRGL_RESOURCE_FD_OPAQUE;
@@ -475,6 +512,14 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
    if (!res) {
       vkr_log("failed to query resource props: invalid res_id %u", args->resourceId);
       vkr_context_set_fatal(ctx);
+      return;
+   }
+
+   /* iSH-AOK: a SHM resource imports into host-visible memory. */
+   if (res->fd_type == VIRGL_RESOURCE_FD_SHM && dev->physical_device->emulate_dma_buf) {
+      args->pMemoryResourceProperties->memoryTypeBits =
+         dev->physical_device->host_visible_memory_type_bits;
+      args->ret = VK_SUCCESS;
       return;
    }
 

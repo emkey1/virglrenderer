@@ -10,6 +10,8 @@
 
 struct vkr_buffer {
    struct vkr_object base;
+   /* iSH-AOK: shares memory as a dma-buf (vkr_dma_buf_emul.h) */
+   bool dma_buf;
 };
 VKR_DEFINE_OBJECT_CAST(buffer, VK_OBJECT_TYPE_BUFFER, VkBuffer)
 

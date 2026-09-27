@@ -43,6 +43,13 @@ vkr_mtl_shm_alloc(void *mtl_device, uint64_t size);
 void
 vkr_mtl_shm_free(struct vkr_mtl_shm *shm);
 
+/* iSH-AOK: wrap an existing shared-memory mapping (a SHM resource imported
+ * into this context) as an MTLBuffer, without taking ownership of the
+ * mapping. size is rounded up to the page size, so the mapping must cover it.
+ */
+struct vkr_mtl_shm *
+vkr_mtl_shm_wrap(void *mtl_device, void *ptr, uint64_t size);
+
 #else /* !__APPLE__ */
 
 static inline void *
@@ -65,6 +72,15 @@ static inline void
 vkr_mtl_shm_free(struct vkr_mtl_shm *shm)
 {
    (void)shm;
+}
+
+static inline struct vkr_mtl_shm *
+vkr_mtl_shm_wrap(void *mtl_device, void *ptr, uint64_t size)
+{
+   (void)mtl_device;
+   (void)ptr;
+   (void)size;
+   return NULL;
 }
 
 #endif /* __APPLE__ */

@@ -220,7 +220,10 @@ vkr_renderer_import_resource(uint32_t ctx_id,
    TRACE_FUNC();
 
    assert(res_id);
-   assert(fd_type == VIRGL_RESOURCE_FD_DMABUF || fd_type == VIRGL_RESOURCE_FD_OPAQUE);
+   /* iSH-AOK: and SHM, another context's dma-buf on a host without them
+    * (vkr_dma_buf_emul.h); vkr_context_import_resource maps it. */
+   assert(fd_type == VIRGL_RESOURCE_FD_DMABUF || fd_type == VIRGL_RESOURCE_FD_OPAQUE ||
+          fd_type == VIRGL_RESOURCE_FD_SHM);
    assert(fd >= 0);
    assert(size);
 

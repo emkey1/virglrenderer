@@ -32,6 +32,9 @@ struct vkr_physical_device {
     * and the renderer's two uses replayed as empty queue submissions. Venus
     * exposes VK_KHR_swapchain only when these import. */
    bool emulate_semaphore_sync_fd;
+   /* iSH-AOK: see vkr_dma_buf_emul.h. */
+   bool emulate_dma_buf;
+   uint32_t host_visible_memory_type_bits;
 
    bool EXT_external_memory_metal;
    bool EXT_metal_objects;

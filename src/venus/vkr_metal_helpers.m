@@ -95,6 +95,35 @@ vkr_mtl_shm_alloc(void *mtl_device, uint64_t size)
    return shm;
 }
 
+struct vkr_mtl_shm *
+vkr_mtl_shm_wrap(void *mtl_device, void *ptr, uint64_t size)
+{
+   if (!mtl_device || !ptr)
+      return NULL;
+
+   const size_t page_size = getpagesize();
+   const size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+   id<MTLDevice> device = (id<MTLDevice>)mtl_device;
+   id<MTLBuffer> buffer = [device newBufferWithBytesNoCopy:ptr
+                                                    length:aligned_size
+                                                   options:MTLResourceStorageModeShared
+                                               deallocator:nil];
+   if (!buffer)
+      return NULL;
+
+   struct vkr_mtl_shm *shm = calloc(1, sizeof(*shm));
+   if (!shm) {
+      CFRelease(buffer);
+      return NULL;
+   }
+   /* the mapping and its fd belong to the resource */
+   shm->shm_fd = -1;
+   shm->shm_ptr = NULL;
+   shm->shm_size = aligned_size;
+   shm->mtl_buffer = buffer;
+   return shm;
+}
+
 void
 vkr_mtl_shm_free(struct vkr_mtl_shm *shm)
 {

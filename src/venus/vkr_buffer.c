@@ -5,6 +5,8 @@
 
 #include "vkr_buffer.h"
 
+#include "vkr_dma_buf_emul.h"
+
 #include "vkr_buffer_gen.h"
 #include "vkr_physical_device.h"
 
@@ -37,7 +39,13 @@ vkr_dispatch_vkCreateBuffer(struct vn_dispatch_context *dispatch,
     * vkr_physical_device_init_memory_properties as well.
     */
 
-   vkr_buffer_create_and_add(dispatch->data, args);
+   struct vkr_device *dev = vkr_device_from_handle(args->device);
+   bool dma_buf;
+   vkr_emul_fix_buffer_create_info(dev->physical_device,
+                                   (VkBufferCreateInfo *)args->pCreateInfo, &dma_buf);
+   struct vkr_buffer *buf = vkr_buffer_create_and_add(dispatch->data, args);
+   if (buf)
+      buf->dma_buf = dma_buf;
 }
 
 static void
@@ -55,8 +63,12 @@ vkr_dispatch_vkGetBufferMemoryRequirements(
    struct vkr_device *dev = vkr_device_from_handle(args->device);
    struct vn_device_proc_table *vk = &dev->proc_table;
 
+   const bool dma_buf = vkr_buffer_from_handle(args->buffer)->dma_buf;
    vn_replace_vkGetBufferMemoryRequirements_args_handle(args);
    vk->GetBufferMemoryRequirements(args->device, args->buffer, args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(dev->physical_device,
+                                 &args->pMemoryRequirements->memoryTypeBits);
 }
 
 static void
@@ -67,8 +79,12 @@ vkr_dispatch_vkGetBufferMemoryRequirements2(
    struct vkr_device *dev = vkr_device_from_handle(args->device);
    struct vn_device_proc_table *vk = &dev->proc_table;
 
+   const bool dma_buf = vkr_buffer_from_handle(args->pInfo->buffer)->dma_buf;
    vn_replace_vkGetBufferMemoryRequirements2_args_handle(args);
    vk->GetBufferMemoryRequirements2(args->device, args->pInfo, args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(
+         dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
 }
 
 static void
@@ -140,8 +156,14 @@ vkr_dispatch_vkGetDeviceBufferMemoryRequirements(
    struct vn_device_proc_table *vk = &dev->proc_table;
 
    vn_replace_vkGetDeviceBufferMemoryRequirements_args_handle(args);
+   bool dma_buf;
+   vkr_emul_fix_buffer_create_info(dev->physical_device,
+                                   (VkBufferCreateInfo *)args->pInfo->pCreateInfo, &dma_buf);
    vk->GetDeviceBufferMemoryRequirements(args->device, args->pInfo,
                                          args->pMemoryRequirements);
+   if (dma_buf)
+      vkr_emul_mask_memory_types(
+         dev->physical_device, &args->pMemoryRequirements->memoryRequirements.memoryTypeBits);
 }
 
 void

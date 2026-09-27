@@ -138,7 +138,7 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
    ext_count += physical_dev->EXT_external_memory_dma_buf;
    ext_count += physical_dev->KHR_external_fence_fd;
    if (ext_count > args->pCreateInfo->enabledExtensionCount ||
-       physical_dev->emulate_semaphore_sync_fd) {
+       physical_dev->emulate_semaphore_sync_fd || physical_dev->emulate_dma_buf) {
       exts = malloc(sizeof(*exts) * ext_count);
       if (!exts) {
          args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -151,6 +151,16 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
          /* iSH-AOK: emulated, so the host device must not be asked for it. */
          if (physical_dev->emulate_semaphore_sync_fd &&
              !strcmp(name, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+            continue;
+         /* Injected on macOS (vkr_physical_device.c), and enabled by a
+          * guest that sees dma-buf support. */
+         if (physical_dev->emulate_dma_buf && !physical_dev->KHR_external_memory_fd &&
+             !strcmp(name, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME))
+            continue;
+         if (physical_dev->emulate_dma_buf &&
+             (!strcmp(name, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) ||
+              !strcmp(name, VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME) ||
+              !strcmp(name, VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)))
             continue;
          exts[ext_count++] = name;
       }
