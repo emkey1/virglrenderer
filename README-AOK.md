@@ -17,6 +17,14 @@ On top of upstream 8167744:
 - `os_create_anonymous_file` falls back to an unlinked temp file when
   `shm_open` is refused, as an iOS app's sandbox may.
 - `subprojects/venus-protocol-1.1.3` is committed (upstream fetches it at
-  configure time), so a build needs no network.
+  configure time), so a build needs no network, and so are its generated
+  renderer headers (`generated/`), so it needs no Python mako either.
+  Regenerate them after changing venus-protocol:
+  `python3 vn_protocol.py --outdir generated --banner <banner> --renderer`.
+- The `vulkan` dependency is optional when not dlopened: the headers come
+  from venus-protocol and the iOS app links MoltenVK.
+
+iSH-AOK builds this as a meson subproject (`subprojects/virglrenderer` links
+to `deps/virglrenderer`).
 
 `main` tracks upstream unchanged.
