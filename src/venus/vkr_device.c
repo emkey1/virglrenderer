@@ -137,7 +137,8 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
    ext_count += physical_dev->KHR_external_memory_fd;
    ext_count += physical_dev->EXT_external_memory_dma_buf;
    ext_count += physical_dev->KHR_external_fence_fd;
-   if (ext_count > args->pCreateInfo->enabledExtensionCount) {
+   if (ext_count > args->pCreateInfo->enabledExtensionCount ||
+       physical_dev->emulate_semaphore_sync_fd) {
       exts = malloc(sizeof(*exts) * ext_count);
       if (!exts) {
          args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -145,8 +146,14 @@ vkr_dispatch_vkCreateDevice(struct vn_dispatch_context *dispatch,
       }
 
       ext_count = 0;
-      for (uint32_t i = 0; i < args->pCreateInfo->enabledExtensionCount; i++)
-         exts[ext_count++] = args->pCreateInfo->ppEnabledExtensionNames[i];
+      for (uint32_t i = 0; i < args->pCreateInfo->enabledExtensionCount; i++) {
+         const char *name = args->pCreateInfo->ppEnabledExtensionNames[i];
+         /* iSH-AOK: emulated, so the host device must not be asked for it. */
+         if (physical_dev->emulate_semaphore_sync_fd &&
+             !strcmp(name, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME))
+            continue;
+         exts[ext_count++] = name;
+      }
 
       if (physical_dev->EXT_external_memory_metal)
          exts[ext_count++] = "VK_EXT_external_memory_metal";

@@ -547,6 +547,37 @@ vkr_dispatch_vkSignalSemaphore(UNUSED struct vn_dispatch_context *dispatch,
    args->ret = vk->SignalSemaphore(args->device, args->pSignalInfo);
 }
 
+/* iSH-AOK: see emulate_semaphore_sync_fd (vkr_physical_device.h). An empty
+ * submission on the device's first queue either signals the semaphore -- a
+ * sync fd imported as an already signaled payload, which Venus waited for in
+ * the guest before sending the import -- or waits on it, consuming the payload
+ * as exporting a sync fd would.
+ */
+static VkResult
+vkr_semaphore_emulate_sync_fd(struct vkr_device *dev, VkSemaphore semaphore, bool signal)
+{
+   struct vn_device_proc_table *vk = &dev->proc_table;
+
+   if (list_is_empty(&dev->queues))
+      return VK_ERROR_UNKNOWN;
+   struct vkr_queue *queue =
+      list_first_entry(&dev->queues, struct vkr_queue, base.track_head);
+
+   const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+   const VkSubmitInfo submit = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = signal ? 0 : 1,
+      .pWaitSemaphores = signal ? NULL : &semaphore,
+      .pWaitDstStageMask = signal ? NULL : &stage,
+      .signalSemaphoreCount = signal ? 1 : 0,
+      .pSignalSemaphores = signal ? &semaphore : NULL,
+   };
+   mtx_lock(&queue->vk_mutex);
+   VkResult result = vk->QueueSubmit(queue->base.handle.queue, 1, &submit, VK_NULL_HANDLE);
+   mtx_unlock(&queue->vk_mutex);
+   return result;
+}
+
 static void
 vkr_dispatch_vkWaitSemaphoreResourceMESA(
    struct vn_dispatch_context *dispatch,
@@ -559,6 +590,12 @@ vkr_dispatch_vkWaitSemaphoreResourceMESA(
    int fd = -1;
 
    vn_replace_vkWaitSemaphoreResourceMESA_args_handle(args);
+
+   if (dev->physical_device->emulate_semaphore_sync_fd) {
+      if (vkr_semaphore_emulate_sync_fd(dev, args->semaphore, false) != VK_SUCCESS)
+         vkr_context_set_fatal(ctx);
+      return;
+   }
 
    const VkSemaphoreGetFdInfoKHR info = {
       .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
@@ -591,6 +628,12 @@ vkr_dispatch_vkImportSemaphoreResourceMESA(
 
    /* resourceId 0 is for importing a signaled payload to sync_fd fence */
    assert(!res_info->resourceId);
+
+   if (dev->physical_device->emulate_semaphore_sync_fd) {
+      if (vkr_semaphore_emulate_sync_fd(dev, res_info->semaphore, true) != VK_SUCCESS)
+         vkr_context_set_fatal(ctx);
+      return;
+   }
 
    const VkImportSemaphoreFdInfoKHR import_info = {
       .sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR,

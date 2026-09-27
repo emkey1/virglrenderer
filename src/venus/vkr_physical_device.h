@@ -27,6 +27,11 @@ struct vkr_physical_device {
 
    bool KHR_external_fence_fd;
    bool KHR_external_semaphore_fd;
+   /* iSH-AOK: sync-fd binary semaphores emulated for a host without them
+    * (MoltenVK): advertised to the guest, never enabled on the host device,
+    * and the renderer's two uses replayed as empty queue submissions. Venus
+    * exposes VK_KHR_swapchain only when these import. */
+   bool emulate_semaphore_sync_fd;
 
    bool EXT_external_memory_metal;
    bool EXT_metal_objects;

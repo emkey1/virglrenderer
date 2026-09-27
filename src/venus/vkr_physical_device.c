@@ -282,6 +282,8 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
          physical_dev->EXT_external_memory_dma_buf = true;
       else if (!strcmp(props->extensionName, "VK_KHR_external_fence_fd"))
          physical_dev->KHR_external_fence_fd = true;
+      else if (!strcmp(props->extensionName, "VK_KHR_external_semaphore_fd"))
+         physical_dev->KHR_external_semaphore_fd = true;
       else if (!strcmp(props->extensionName, "VK_EXT_external_memory_metal"))
          physical_dev->EXT_external_memory_metal = true;
       else if (!strcmp(props->extensionName, "VK_EXT_metal_objects"))
@@ -337,6 +339,22 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
          advertised_count++;
       } else {
          vkr_log("failed to inject VK_KHR_external_memory_fd");
+      }
+   }
+
+   /* iSH-AOK: see emulate_semaphore_sync_fd. */
+   if (physical_dev->EXT_external_memory_metal && !physical_dev->KHR_external_semaphore_fd) {
+      VkExtensionProperties *new_exts =
+         realloc(exts, sizeof(*exts) * (advertised_count + 1));
+      if (new_exts) {
+         exts = new_exts;
+         strcpy(new_exts[advertised_count].extensionName,
+                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
+         new_exts[advertised_count].specVersion = 1;
+         advertised_count++;
+         physical_dev->emulate_semaphore_sync_fd = true;
+      } else {
+         vkr_log("failed to inject VK_KHR_external_semaphore_fd");
       }
    }
 
@@ -797,6 +815,23 @@ vkr_dispatch_vkGetPhysicalDeviceExternalSemaphoreProperties(
    vk->GetPhysicalDeviceExternalSemaphoreProperties(args->physicalDevice,
                                                     args->pExternalSemaphoreInfo,
                                                     args->pExternalSemaphoreProperties);
+
+   /* iSH-AOK: sync fds of binary semaphores, emulated (see
+    * emulate_semaphore_sync_fd). A timeline semaphore stays as the host
+    * reports it. */
+   const VkPhysicalDeviceExternalSemaphoreInfo *info = args->pExternalSemaphoreInfo;
+   if (physical_dev->emulate_semaphore_sync_fd &&
+       info->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT) {
+      const VkSemaphoreTypeCreateInfo *type =
+         vkr_find_struct(info->pNext, VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO);
+      if (!type || type->semaphoreType == VK_SEMAPHORE_TYPE_BINARY) {
+         VkExternalSemaphoreProperties *props = args->pExternalSemaphoreProperties;
+         props->exportFromImportedHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+         props->compatibleHandleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+         props->externalSemaphoreFeatures = VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT |
+                                            VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT;
+      }
+   }
 }
 
 static void
