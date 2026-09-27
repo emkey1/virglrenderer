@@ -13,6 +13,17 @@ project(
                     'c_std=c11'],
 )
 
+# iSH-AOK: the renderer headers are generated/ in this tree, made by
+#   python3 vn_protocol.py --outdir generated --banner <banner> --renderer
+# from these very XMLs and templates, so a build needs neither mako nor git.
+if import('fs').exists('generated/vn_protocol_renderer.h')
+  dep_vn_protocol_renderer = declare_dependency(
+    include_directories: include_directories('.', 'generated'),
+  )
+  meson.override_dependency('vn_protocol_renderer', dep_vn_protocol_renderer)
+  subdir_done()
+endif
+
 py = import('python').find_installation('python3', modules: ['mako'])
 pkg = import('pkgconfig')
 
