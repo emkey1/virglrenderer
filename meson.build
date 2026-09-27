@@ -386,7 +386,9 @@ if with_venus
    if get_option('vulkan-dload')
       conf_data.set('ENABLE_VULKAN_DLOAD', 1)
    else
-      venus_dep += dependency('vulkan')
+      # iSH-AOK: optional. venus-protocol carries the Vulkan headers, and an
+      # iOS app links MoltenVK itself, where no vulkan.pc exists to find.
+      venus_dep += dependency('vulkan', required: false)
    endif
 
    if host_machine.system() in ['freebsd', 'openbsd']
