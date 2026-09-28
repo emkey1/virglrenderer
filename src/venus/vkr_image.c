@@ -9,6 +9,13 @@
 #include "vkr_physical_device.h"
 #include "vkr_dma_buf_emul.h"
 
+#ifdef __APPLE__
+/* iSH-AOK's MoltenVK: the row pitch the next image this thread creates uses. */
+void mvkAOKSetNextImageRowPitch(unsigned long long row_pitch);
+#else
+static inline void mvkAOKSetNextImageRowPitch(unsigned long long row_pitch) { (void)row_pitch; }
+#endif
+
 static void
 vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
                            struct vn_command_vkCreateImage *args)
@@ -42,13 +49,20 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
       args->ret = result;
       return;
    }
+   /* iSH-AOK: a LINEAR buffer from another process keeps the rows it was
+    * drawn with, which may be wider than the host would pad them (a 1212-pixel
+    * window: 4864 bytes from the guest, 4848 here). Ask MoltenVK for that
+    * pitch; it takes one Metal can use. */
+   if (explicit_pitch)
+      mvkAOKSetNextImageRowPitch(explicit_pitch);
    struct vkr_image *image = vkr_image_create_and_add(dispatch->data, args);
+   mvkAOKSetNextImageRowPitch(0);
    if (!image)
       return;
    image->dma_buf = dma_buf;
 
    /* iSH-AOK: an imported LINEAR buffer is only this image if the host lays
-    * its rows out the same way. */
+    * its rows out the same way -- a pitch MoltenVK could not take. */
    if (explicit_pitch) {
       struct vn_device_proc_table *vk = &dev->proc_table;
       const VkImageSubresource sub = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
