@@ -341,6 +341,23 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
    if (!vkr_device_memory_export_blob(mem, blob_size, blob_flags, &blob))
       return false;
 
+   /* iSH-AOK: an SHM blob (vkr_dma_buf_emul.h) is kept as a mapping, as one
+    * imported from another context is: res->u is the mapping for SHM, and
+    * this stored an fd there (or -1), so importing the resource back into
+    * this context wrapped a bad pointer and failed -- Xwayland on zink lost
+    * its context at the first cursor it drew.
+    */
+   if (blob.type == VIRGL_RESOURCE_FD_SHM) {
+      const size_t page_size = getpagesize();
+      const uint64_t map_size = (blob_size + page_size - 1) & ~(page_size - 1);
+      if (!vkr_context_import_resource_from_shm(ctx, res_id, map_size, blob.u.fd)) {
+         close(blob.u.fd);
+         return false;
+      }
+      *out_blob = blob;
+      return true;
+   }
+
    /* If memory might get exported, store a dup'ed fd in vkr_resource for:
     * - vkAllocateMemory for dma_buf import
     * - vkGetMemoryFdPropertiesKHR for dma_buf fd properties query

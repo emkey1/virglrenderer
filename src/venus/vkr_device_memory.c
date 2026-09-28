@@ -35,6 +35,7 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
       break;
    default:
+      vkr_log("cannot import resource %u: fd type %d", res_info->resourceId, res->fd_type);
       return false;
    }
 
@@ -246,8 +247,35 @@ vkr_gbm_get_fd_info_from_allocation_info(UNUSED struct vkr_physical_device *phys
 #endif /* ENABLE_GBM_ALLOCATION */
 
 static void
+vkr_allocate_memory(struct vn_dispatch_context *dispatch,
+                    struct vn_command_vkAllocateMemory *args);
+
+/* iSH-AOK: a failed allocation is otherwise silent here, and Venus may
+ * allocate without waiting for the result: the first sign was a later
+ * "failed to look up object N of type 8" that ended the context.
+ */
+static void
 vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                               struct vn_command_vkAllocateMemory *args)
+{
+   const VkMemoryAllocateInfo *info = args->pAllocateInfo;
+   const VkDeviceSize size = info ? info->allocationSize : 0;
+   const uint32_t type = info ? info->memoryTypeIndex : 0;
+   const bool import_res =
+      info && vkr_find_struct(info->pNext, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
+   const VkExportMemoryAllocateInfo *export_info =
+      info ? vkr_find_struct(info->pNext, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO) : NULL;
+   const uint32_t export_types = export_info ? export_info->handleTypes : 0;
+   vkr_allocate_memory(dispatch, args);
+   if (args->ret != VK_SUCCESS)
+      vkr_log("vkAllocateMemory failed (%d): size %" PRIu64 ", type %u, %s, export 0x%x",
+              args->ret, (uint64_t)size, type, import_res ? "imports a resource" : "new",
+              export_types);
+}
+
+static void
+vkr_allocate_memory(struct vn_dispatch_context *dispatch,
+                    struct vn_command_vkAllocateMemory *args)
 {
    TRACE_FUNC();
    struct vkr_context *ctx = dispatch->data;
@@ -325,6 +353,37 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    int udmabuf_fd = -1;
    void *gbm_bo = NULL;
    VkExportMemoryAllocateInfo local_export_info;
+
+   /* iSH-AOK: device-local memory the guest means to share (a GBM buffer on
+    * zink: Xwayland's cursors and pixmaps) has no dma-buf to go out as, and an
+    * opaque fd Metal cannot take back: the import failed with
+    * VK_ERROR_INVALID_EXTERNAL_HANDLE, Venus had already moved on, and the
+    * bind that followed ended the context. Back it with shared memory, as
+    * host-visible memory is below, so it exports as SHM like every other
+    * dma-buf here. Apple GPUs share one memory, so nothing is lost.
+    */
+   if (!res_info && !(property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+       physical_dev->emulate_dma_buf && physical_dev->EXT_external_memory_metal &&
+       export_info &&
+       (export_info->handleTypes & (VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT |
+                                    VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT))) {
+      mtl_shm = vkr_mtl_shm_alloc(dev->mtl_device, alloc_info->allocationSize);
+      if (!mtl_shm) {
+         args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
+         return;
+      }
+      vkr_remove_struct(alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
+      export_info = NULL;
+      local_metal_import = (VkImportMemoryMetalHandleInfoEXT){
+         .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT,
+         .pNext = alloc_info->pNext,
+         .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLBUFFER_BIT_EXT,
+         .handle = mtl_shm->mtl_buffer,
+      };
+      alloc_info->pNext = &local_metal_import;
+      alloc_info->allocationSize = mtl_shm->shm_size;
+      valid_fd_types = 1 << VIRGL_RESOURCE_FD_SHM;
+   }
 
    if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
       /* An implementation can support dma_buf import along with opaque fd export/import.
@@ -421,12 +480,15 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
       }
    }
 
-   /* iSH-AOK: the host has no dma-buf; the memory is exported as SHM instead
-    * (vkr_dma_buf_emul.h), so the request must not reach it.
+   /* iSH-AOK: the host has no dma-buf, and Metal no opaque fd; shared memory
+    * goes out as SHM instead (vkr_dma_buf_emul.h), so neither request may
+    * reach it -- MoltenVK refuses the allocation outright.
     */
+   const VkExternalMemoryHandleTypeFlags host_less_handles =
+      VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT | VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
    if (physical_dev->emulate_dma_buf && export_info &&
-       (export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
-      export_info->handleTypes &= ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+       (export_info->handleTypes & host_less_handles)) {
+      export_info->handleTypes &= ~host_less_handles;
       if (!export_info->handleTypes) {
          vkr_remove_struct(alloc_info, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
          export_info = NULL;
