@@ -250,6 +250,54 @@ static void
 vkr_allocate_memory(struct vn_dispatch_context *dispatch,
                     struct vn_command_vkAllocateMemory *args);
 
+/* iSH-AOK: what the guest's device memory costs the host, which on iOS is
+ * the app's own footprint, the ledger jetsam kills on. Tux Racer's race took
+ * the M4 app from 1 GB to 3.8 GB, then past its 6 GB limit, with the game's
+ * own memory under 200 MB and the guest-visible blobs under 256 MB. Each
+ * allocation of 32 MB or more is logged, and the live total each time it
+ * climbs past another 256 MB.
+ */
+static _Atomic uint64_t vkr_mem_live_bytes;
+static _Atomic uint32_t vkr_mem_live_count;
+static _Atomic uint64_t vkr_mem_reported_mark;
+
+static void
+vkr_mem_account(uint64_t size, uint32_t type, uint32_t flags, bool add)
+{
+   uint64_t live;
+   if (add) {
+      live = atomic_fetch_add(&vkr_mem_live_bytes, size) + size;
+      atomic_fetch_add(&vkr_mem_live_count, 1);
+      if (size >= (32ull << 20))
+         vkr_log("vkAllocateMemory %" PRIu64 " MB, type %u (flags 0x%x); live %u, %" PRIu64 " MB",
+                 size >> 20, type, flags, atomic_load(&vkr_mem_live_count), live >> 20);
+   } else {
+      live = atomic_fetch_sub(&vkr_mem_live_bytes, size) - size;
+      atomic_fetch_sub(&vkr_mem_live_count, 1);
+      if (size >= (32ull << 20))
+         vkr_log("vkFreeMemory %" PRIu64 " MB, type %u; live %u, %" PRIu64 " MB",
+                 size >> 20, type, atomic_load(&vkr_mem_live_count), live >> 20);
+   }
+   const uint64_t mark = live >> 28;
+   uint64_t reported = atomic_load(&vkr_mem_reported_mark);
+   if (mark > reported) {
+      if (atomic_compare_exchange_strong(&vkr_mem_reported_mark, &reported, mark))
+         vkr_log("device memory live: %u allocations, %" PRIu64 " MB",
+                 atomic_load(&vkr_mem_live_count), live >> 20);
+   } else if (mark + 1 < reported) {
+      atomic_compare_exchange_strong(&vkr_mem_reported_mark, &reported, mark);
+   }
+}
+
+/* iSH-AOK: the totals, for /proc/ish/host_vm. */
+void vkr_aok_mem_stats(uint64_t *bytes, uint32_t *count);
+void
+vkr_aok_mem_stats(uint64_t *bytes, uint32_t *count)
+{
+   *bytes = atomic_load(&vkr_mem_live_bytes);
+   *count = atomic_load(&vkr_mem_live_count);
+}
+
 /* iSH-AOK: a failed allocation is otherwise silent here, and Venus may
  * allocate without waiting for the result: the first sign was a later
  * "failed to look up object N of type 8" that ended the context.
@@ -521,6 +569,7 @@ vkr_allocate_memory(struct vn_dispatch_context *dispatch,
    mem->mtl_shm = mtl_shm;
    mem->allocation_size = alloc_info->allocationSize;
    mem->memory_type_index = mem_type_index;
+   vkr_mem_account(mem->allocation_size, mem_type_index, property_flags, true);
 }
 
 static void
@@ -635,6 +684,9 @@ vkr_context_init_device_memory_dispatch(struct vkr_context *ctx)
 void
 vkr_device_memory_release(struct vkr_device_memory *mem)
 {
+   /* Here rather than in vkFreeMemory: a device torn down with its memory
+    * still allocated (a client that died) releases it here too. */
+   vkr_mem_account(mem->allocation_size, mem->memory_type_index, mem->property_flags, false);
    vkr_mtl_shm_free(mem->mtl_shm);
    if (mem->gbm_bo)
       vkr_gbm_bo_destroy(mem->gbm_bo);
